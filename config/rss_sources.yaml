@@ -1,0 +1,15 @@
+rss_sources:
+  - source_name: marketwatch_top_stories
+    feed_url: https://feeds.content.dowjones.io/public/rss/mw_topstories
+
+  - source_name: marketwatch_realtime_headlines
+    feed_url: https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines
+
+  - source_name: marketwatch_market_pulse
+    feed_url: https://feeds.content.dowjones.io/public/rss/mw_marketpulse
+
+  - source_name: nasdaq_trader_current_headlines
+    feed_url: https://www.nasdaqtrader.com/rss.aspx?categorylist=0&feed=currentheadlines
+
+  - source_name: nasdaq_trader_general_news
+    feed_url: https://www.nasdaqtrader.com/rss.aspx?categorylist=14&feed=currentheadlines

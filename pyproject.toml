@@ -1,0 +1,36 @@
+[project]
+name = "dailyfinance"
+version = "0.1.0"
+description = "Aggregate, summarize, and analyze daily financial information with AI."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "python-dotenv",
+    "sqlalchemy",
+    "httpx",
+    "feedparser",
+    "pyyaml",
+    "yfinance",
+]
+
+[project.scripts]
+dailyfinance-ingest = "dailyfinance.cli:main"
+dailyfinance-ingest-rss = "dailyfinance.cli:main"
+dailyfinance-migrate-jsonl-to-sqlite = "dailyfinance.migrate_jsonl_to_sqlite:main"
+dailyfinance-process-sqlite = "dailyfinance.process_sqlite:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "mypy",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
