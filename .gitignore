@@ -216,3 +216,23 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# DailyFinance project files
+.env.*
+!.env.example
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Downloaded / generated data
+data/
+cache/
+logs/
+outputs/
+reports/
+
+# API responses / raw finance documents
+raw/
+tmp/

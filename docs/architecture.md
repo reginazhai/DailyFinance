@@ -21,6 +21,7 @@ Processing may include:
 - Text cleaning
 - Source metadata extraction
 - Company/entity extraction
+- Keyword search indexing
 - Sentiment or relevance scoring
 - Chunking for retrieval
 
@@ -44,6 +45,26 @@ DailyFinance preserves historical records but treats daily-facing processed
 document workflows as recent by default. The default recent window is seven
 days and can be overridden for explicit backfills or historical analysis.
 
+## Search And Retrieval
+
+Processed documents are indexed with SQLite FTS5 for local keyword search.
+
+The search index includes:
+
+- normalized titles
+- normalized content
+- ticker symbols
+- company names from curated ticker-to-company mappings
+
+The index is synchronized when processed documents are saved and can be rebuilt
+from SQLite with the search-index rebuild CLI. Search results return public
+retrieval fields such as document IDs, snippets, tickers, companies, source
+names, dates, and URLs. Raw payloads remain available through raw document
+storage but are not returned in search responses by default.
+
+This is intentionally keyword search only. Embeddings, semantic search, and
+LLM-generated answers are future layers.
+
 ## Storage
 
 The application stores structured and unstructured financial information.
@@ -59,6 +80,7 @@ Current local storage supports:
 - JSONL storage for raw documents
 - SQLite storage for raw documents, sources, processed documents, and queryable
   processed-document ticker associations
+- SQLite FTS5 index for processed-document keyword search
 
 Database migrations are not yet introduced; SQLAlchemy creates local SQLite
 tables for development.

@@ -49,7 +49,9 @@ def test_processed_documents_endpoint_defaults_to_recent_records(tmp_path) -> No
     response = client.get("/processed-documents", params={"limit": 10})
 
     assert response.status_code == 200
-    assert [document["normalized_title"] for document in response.json()] == [
+    body = response.json()
+    assert body["total"] == 1
+    assert [document["normalized_title"] for document in body["results"]] == [
         "$AAPL recent update"
     ]
 
@@ -73,7 +75,9 @@ def test_processed_documents_endpoint_can_include_historical_records(tmp_path) -
     )
 
     assert response.status_code == 200
-    assert len(response.json()) == 1
+    body = response.json()
+    assert body["total"] == 1
+    assert len(body["results"]) == 1
 
 
 def test_processed_documents_endpoint_filters_results(tmp_path) -> None:
@@ -91,8 +95,10 @@ def test_processed_documents_endpoint_filters_results(tmp_path) -> None:
     )
 
     assert response.status_code == 200
-    assert len(response.json()) == 1
-    assert response.json()[0]["tickers"] == ["AAPL"]
+    body = response.json()
+    assert body["total"] == 1
+    assert len(body["results"]) == 1
+    assert body["results"][0]["tickers"] == ["AAPL"]
 
 
 def test_processed_document_detail_endpoint(tmp_path) -> None:

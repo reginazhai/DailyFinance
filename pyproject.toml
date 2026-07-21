@@ -1,7 +1,7 @@
 [project]
 name = "dailyfinance"
-version = "0.1.0"
-description = "Aggregate, summarize, and analyze daily financial information with AI."
+version = "0.3.0"
+description = "Collect, process, store, and retrieve daily financial information."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi",
@@ -20,6 +20,8 @@ dailyfinance-ingest = "dailyfinance.cli:main"
 dailyfinance-ingest-rss = "dailyfinance.cli:main"
 dailyfinance-migrate-jsonl-to-sqlite = "dailyfinance.migrate_jsonl_to_sqlite:main"
 dailyfinance-process-sqlite = "dailyfinance.process_sqlite:main"
+dailyfinance-rebuild-search-index = "dailyfinance.rebuild_search_index:main"
+dailyfinance-refresh = "dailyfinance.refresh:main"
 
 [project.optional-dependencies]
 dev = [

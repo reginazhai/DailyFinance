@@ -31,12 +31,15 @@ Current progress:
 - Added processed-document API endpoints
 - Added recency policy so daily workflows default to recent records while
   historical records remain available explicitly
+- Added SQLite FTS keyword search over processed documents
+- Added search API with filters, pagination, snippets, and relevance/date sorting
+- Added search-index rebuild CLI
 
 Remaining:
 
 - Broaden deterministic metadata extraction
 - Add more robust normalized entities
-- Add basic search over processed documents
+- Tune keyword search relevance and retrieval ergonomics
 - Add basic summarization after deterministic enrichment is stable
 
 ## Phase 4: Storage
@@ -61,15 +64,14 @@ Remaining:
 
 Current objective:
 
-Build a reliable pipeline that collects and stores financial information.
+Make collected and processed financial information easy to retrieve.
 
 Current focus:
 
-- Project setup
-- Configuration
-- First data collector
-- Storage layer
-- Deterministic metadata enrichment
+- SQLite keyword search
+- Processed-document filtering
+- Retrieval API ergonomics
+- Preparing for SEC EDGAR and FRED collection
 
 Future AI features will only be added after the data pipeline is stable.
 

@@ -2,18 +2,23 @@
 
 from collections.abc import Iterable
 from datetime import datetime, timezone
+import json
 from pathlib import Path
+import re
+import shlex
 from typing import Any
 
 from sqlalchemy import (
     DateTime,
     ForeignKey,
+    func,
     Integer,
     String,
     Text,
     UniqueConstraint,
     create_engine,
     select,
+    text,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import (
@@ -26,7 +31,7 @@ from sqlalchemy.orm import (
 )
 from sqlalchemy.types import JSON
 
-from dailyfinance.models import DocumentType, ProcessedDocument, RawDocument
+from dailyfinance.models import DocumentType, ProcessedDocument, RawDocument, SearchResult
 from dailyfinance.processing.quality import is_valid_raw_document, normalize_raw_document
 from dailyfinance.storage.base import DocumentStore, StorageWriteResult
 from dailyfinance.utils import derive_document_id
@@ -143,6 +148,7 @@ class DatabaseDocumentStore(DocumentStore):
         self.session_factory = sessionmaker(self.engine, expire_on_commit=False)
         if create_tables:
             Base.metadata.create_all(self.engine)
+            self._ensure_search_index()
 
     def save(self, document: RawDocument) -> StorageWriteResult:
         """Persist one raw document if it does not already exist."""
@@ -246,6 +252,14 @@ class DatabaseDocumentStore(DocumentStore):
                 ],
             )
             session.add(record)
+            self._upsert_search_index(
+                session,
+                processed_document_id=document.id,
+                title=document.normalized_title,
+                content=document.normalized_content,
+                companies=document.companies,
+                tickers=document.tickers,
+            )
             session.commit()
             return True
 
@@ -289,29 +303,54 @@ class DatabaseDocumentStore(DocumentStore):
         published_to: datetime | None = None,
         recent_cutoff: datetime | None = None,
         limit: int = 20,
+        offset: int = 0,
+        sort_by: str = "processed_at",
+        sort_order: str = "desc",
     ) -> list[ProcessedDocument]:
         """List processed documents with simple filters."""
         with self.session_factory() as session:
-            statement = select(ProcessedDocumentRecord).join(
-                ProcessedDocumentRecord.raw_document
-            ).join(DocumentRecord.source)
-            if ticker:
-                statement = statement.join(ProcessedDocumentRecord.ticker_links).where(
-                    ProcessedDocumentTickerRecord.ticker == ticker.upper()
-                )
-            if source_name:
-                statement = statement.where(SourceRecord.name == source_name)
-            if document_type:
-                statement = statement.where(ProcessedDocumentRecord.document_type == document_type)
-            if recent_cutoff and published_from is None:
-                statement = statement.where(ProcessedDocumentRecord.published_at >= recent_cutoff)
-            if published_from:
-                statement = statement.where(ProcessedDocumentRecord.published_at >= published_from)
-            if published_to:
-                statement = statement.where(ProcessedDocumentRecord.published_at <= published_to)
-            statement = statement.order_by(ProcessedDocumentRecord.processed_at.desc()).limit(limit)
+            statement = self._processed_documents_statement(
+                source_name=source_name,
+                ticker=ticker,
+                document_type=document_type,
+                published_from=published_from,
+                published_to=published_to,
+                recent_cutoff=recent_cutoff,
+            )
+            sort_column = (
+                ProcessedDocumentRecord.published_at
+                if sort_by == "published_at"
+                else ProcessedDocumentRecord.processed_at
+            )
+            statement = statement.order_by(
+                sort_column.asc() if sort_order == "asc" else sort_column.desc()
+            )
+            statement = statement.offset(offset).limit(limit)
             records = session.scalars(statement).unique().all()
             return [_processed_record_to_document(record) for record in records]
+
+    def count_processed_documents(
+        self,
+        *,
+        source_name: str | None = None,
+        ticker: str | None = None,
+        document_type: str | None = None,
+        published_from: datetime | None = None,
+        published_to: datetime | None = None,
+        recent_cutoff: datetime | None = None,
+    ) -> int:
+        """Count processed documents matching filters."""
+        with self.session_factory() as session:
+            statement = self._processed_documents_statement(
+                source_name=source_name,
+                ticker=ticker,
+                document_type=document_type,
+                published_from=published_from,
+                published_to=published_to,
+                recent_cutoff=recent_cutoff,
+            )
+            count_statement = select(func.count()).select_from(statement.subquery())
+            return int(session.scalar(count_statement) or 0)
 
     def get_processed_document(self, document_id: str) -> ProcessedDocument | None:
         """Return one processed document by ID."""
@@ -320,6 +359,134 @@ class DatabaseDocumentStore(DocumentStore):
             if record is None:
                 return None
             return _processed_record_to_document(record)
+
+    def search_processed_documents(
+        self,
+        *,
+        query: str,
+        source_name: str | None = None,
+        ticker: str | None = None,
+        document_type: str | None = None,
+        published_from: datetime | None = None,
+        published_to: datetime | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        sort: str = "relevance",
+    ) -> tuple[int, list[SearchResult]]:
+        """Search processed documents with SQLite FTS5."""
+        fts_query = _build_fts_query(query)
+        if fts_query is None:
+            return 0, []
+
+        where_clauses = ["processed_documents_fts MATCH :query"]
+        params: dict[str, Any] = {"query": fts_query, "limit": limit, "offset": offset}
+        if source_name:
+            where_clauses.append("s.name = :source_name")
+            params["source_name"] = source_name
+        if ticker:
+            where_clauses.append(
+                """
+                EXISTS (
+                    SELECT 1
+                    FROM processed_document_tickers pdt
+                    WHERE pdt.processed_document_id = pd.id
+                    AND pdt.ticker = :ticker
+                )
+                """
+            )
+            params["ticker"] = ticker.upper()
+        if document_type:
+            where_clauses.append("pd.document_type = :document_type")
+            params["document_type"] = document_type
+        if published_from:
+            where_clauses.append("pd.published_at >= :published_from")
+            params["published_from"] = published_from
+        if published_to:
+            where_clauses.append("pd.published_at <= :published_to")
+            params["published_to"] = published_to
+
+        where_sql = " AND ".join(where_clauses)
+        order_sql = (
+            "pd.published_at DESC, rank ASC"
+            if sort == "published_at"
+            else "rank ASC, pd.published_at DESC"
+        )
+        base_sql = f"""
+            FROM processed_documents_fts
+            JOIN processed_documents pd
+              ON pd.id = processed_documents_fts.processed_document_id
+            JOIN documents d
+              ON d.id = pd.raw_document_id
+            JOIN sources s
+              ON s.id = d.source_id
+            WHERE {where_sql}
+        """
+
+        with self.session_factory() as session:
+            total = int(
+                session.scalar(text(f"SELECT COUNT(*) {base_sql}"), params) or 0
+            )
+            rows = session.execute(
+                text(
+                    f"""
+                    SELECT
+                        pd.id AS document_id,
+                        pd.raw_document_id AS raw_document_id,
+                        pd.normalized_title AS title,
+                        snippet(
+                            processed_documents_fts,
+                            -1,
+                            '',
+                            '',
+                            '...',
+                            24
+                        ) AS snippet,
+                        s.name AS source_name,
+                        pd.document_type AS document_type,
+                        pd.companies AS companies,
+                        pd.published_at AS published_at,
+                        d.url AS url,
+                        bm25(processed_documents_fts) AS rank,
+                        COALESCE(
+                            (
+                                SELECT json_group_array(pdt.ticker)
+                                FROM processed_document_tickers pdt
+                                WHERE pdt.processed_document_id = pd.id
+                            ),
+                            '[]'
+                        ) AS tickers
+                    {base_sql}
+                    ORDER BY {order_sql}
+                    LIMIT :limit OFFSET :offset
+                    """
+                ),
+                params,
+            ).mappings()
+            return total, [_search_row_to_result(row) for row in rows]
+
+    def rebuild_search_index(self) -> dict[str, int]:
+        """Rebuild the FTS index from persisted processed documents."""
+        indexed = 0
+        skipped = 0
+        failed = 0
+        with self.session_factory() as session:
+            session.execute(text("DELETE FROM processed_documents_fts"))
+            records = session.scalars(select(ProcessedDocumentRecord)).unique().all()
+            for record in records:
+                try:
+                    self._upsert_search_index(
+                        session,
+                        processed_document_id=record.id,
+                        title=record.normalized_title,
+                        content=record.normalized_content,
+                        companies=record.companies,
+                        tickers=[link.ticker for link in record.ticker_links],
+                    )
+                    indexed += 1
+                except Exception:
+                    failed += 1
+            session.commit()
+        return {"indexed": indexed, "skipped": skipped, "failed": failed}
 
     def _save_document(self, session: Session, document: RawDocument) -> str:
         if not is_valid_raw_document(document):
@@ -365,6 +532,99 @@ class DatabaseDocumentStore(DocumentStore):
         session.add(source)
         session.flush()
         return source
+
+    def _processed_documents_statement(
+        self,
+        *,
+        source_name: str | None = None,
+        ticker: str | None = None,
+        document_type: str | None = None,
+        published_from: datetime | None = None,
+        published_to: datetime | None = None,
+        recent_cutoff: datetime | None = None,
+    ):
+        statement = select(ProcessedDocumentRecord).join(
+            ProcessedDocumentRecord.raw_document
+        ).join(DocumentRecord.source)
+        if ticker:
+            statement = statement.join(ProcessedDocumentRecord.ticker_links).where(
+                ProcessedDocumentTickerRecord.ticker == ticker.upper()
+            )
+        if source_name:
+            statement = statement.where(SourceRecord.name == source_name)
+        if document_type:
+            statement = statement.where(ProcessedDocumentRecord.document_type == document_type)
+        if recent_cutoff and published_from is None:
+            statement = statement.where(ProcessedDocumentRecord.published_at >= recent_cutoff)
+        if published_from:
+            statement = statement.where(ProcessedDocumentRecord.published_at >= published_from)
+        if published_to:
+            statement = statement.where(ProcessedDocumentRecord.published_at <= published_to)
+        return statement
+
+    def _ensure_search_index(self) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS processed_documents_fts
+                    USING fts5(
+                        processed_document_id UNINDEXED,
+                        title,
+                        content,
+                        companies,
+                        tickers
+                    )
+                    """
+                )
+            )
+
+    def _upsert_search_index(
+        self,
+        session: Session,
+        *,
+        processed_document_id: str,
+        title: str | None,
+        content: str | None,
+        companies: list[str],
+        tickers: list[str],
+    ) -> None:
+        session.execute(
+            text(
+                """
+                DELETE FROM processed_documents_fts
+                WHERE processed_document_id = :processed_document_id
+                """
+            ),
+            {"processed_document_id": processed_document_id},
+        )
+        session.execute(
+            text(
+                """
+                INSERT INTO processed_documents_fts (
+                    processed_document_id,
+                    title,
+                    content,
+                    companies,
+                    tickers
+                )
+                VALUES (
+                    :processed_document_id,
+                    :title,
+                    :content,
+                    :companies,
+                    :tickers
+                )
+                """
+            ),
+            {
+                "processed_document_id": processed_document_id,
+                "title": title or "",
+                "content": content or "",
+                "companies": " ".join(companies),
+                "tickers": " ".join(tickers),
+            },
+        )
 
 
 def _create_engine(database_url: str) -> Engine:
@@ -432,3 +692,73 @@ def _ensure_utc(value: datetime | None) -> datetime | None:
     if value.tzinfo:
         return value.astimezone(timezone.utc)
     return value.replace(tzinfo=timezone.utc)
+
+
+def _build_fts_query(query: str) -> str | None:
+    try:
+        raw_terms = shlex.split(query)
+    except ValueError:
+        return None
+    terms: list[str] = []
+    for raw_term in raw_terms:
+        if not raw_term.strip():
+            continue
+        if " " in raw_term:
+            phrase_terms = [_sanitize_fts_term(term) for term in raw_term.split()]
+            phrase = " ".join(term for term in phrase_terms if term)
+            if phrase:
+                terms.append(f'"{phrase}"')
+            continue
+        term = _sanitize_fts_term(raw_term)
+        if term:
+            terms.append(term)
+    if not terms:
+        return None
+    return " ".join(terms)
+
+
+def _sanitize_fts_term(term: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_]", "", term)
+
+
+def _search_row_to_result(row: Any) -> SearchResult:
+    companies = _json_list(row["companies"])
+    tickers = _json_list(row["tickers"])
+    return SearchResult(
+        document_id=row["document_id"],
+        raw_document_id=row["raw_document_id"],
+        title=row["title"],
+        snippet=row["snippet"],
+        source_name=row["source_name"],
+        document_type=DocumentType(row["document_type"]),
+        tickers=sorted(tickers),
+        companies=companies,
+        published_at=_parse_datetime(row["published_at"]),
+        url=row["url"],
+        relevance_score=float(-row["rank"]),
+    )
+
+
+def _json_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if not value:
+        return []
+    try:
+        parsed_value = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(parsed_value, list):
+        return []
+    return [str(item) for item in parsed_value]
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return _ensure_utc(value)
+    if not value:
+        return None
+    try:
+        return _ensure_utc(datetime.fromisoformat(str(value)))
+    except ValueError:
+        return None

@@ -30,6 +30,9 @@ The project is designed around a modular data pipeline that separates data colle
        ProcessedDocument
                 |
                 v
+        SQLite FTS Search
+                |
+                v
           FastAPI API
                 |
                 v
@@ -49,6 +52,8 @@ The project is designed around a modular data pipeline that separates data colle
 - URL and timestamp normalization
 - Conservative ticker extraction
 - Small ticker-to-company mapping
+- SQLite full-text search over processed documents
+- Paginated processed-document retrieval
 - Read-only FastAPI API
 - Configurable RSS sources
 - Offline unit tests
@@ -76,19 +81,19 @@ The project is designed around a modular data pipeline that separates data colle
 - [x] FastAPI read-only API
 - [x] Deterministic processing pipeline
 - [x] Processed document persistence
+- [x] SQLite keyword search and retrieval
 
 ### In Progress
 
 - [ ] Broader deterministic metadata extraction
 - [ ] Ticker normalization
 - [ ] Company extraction from curated mappings
-- [ ] Processed-document search filters
+- [ ] Search relevance tuning
 
 ### Planned
 
 - [ ] SEC EDGAR collection
 - [ ] FRED/macroeconomic data collection
-- [ ] Search and retrieval
 - [ ] LLM-generated summaries
 - [ ] Daily intelligence reports
 - [ ] Portfolio monitoring
@@ -105,7 +110,7 @@ v0.5  Daily intelligence reports
 v1.0  AI financial intelligence platform
 ```
 
-Current project state: between `v0.2` and `v0.3`. Collection, storage, read-only APIs, and deterministic processing are implemented. LLM summarization is planned but not implemented yet.
+Current project state: `v0.3`. Collection, storage, read-only APIs, deterministic processing, and SQLite keyword search are implemented. LLM summarization is planned but not implemented yet.
 
 ## Tech Stack
 
@@ -174,6 +179,34 @@ dailyfinance-ingest \
 
 ## SQLite Workflow
 
+Run the full local refresh workflow in one command:
+
+```bash
+dailyfinance-refresh \
+  --all-configured-rss \
+  --jsonl-path data/raw_documents.jsonl \
+  --database-url sqlite:///data/dailyfinance.db \
+  --limit 1000
+```
+
+This collects configured RSS sources, appends raw JSONL records, migrates new
+unique raw documents into SQLite, processes recent raw documents into
+`ProcessedDocument` records, and rebuilds the SQLite search index.
+
+To include older backfill records during processing:
+
+```bash
+dailyfinance-refresh \
+  --all-configured-rss \
+  --jsonl-path data/raw_documents.jsonl \
+  --database-url sqlite:///data/dailyfinance.db \
+  --include-historical \
+  --limit 1000
+```
+
+The lower-level commands are still available when you want to inspect each
+stage separately.
+
 Migrate existing JSONL documents into SQLite:
 
 ```bash
@@ -196,6 +229,13 @@ By default, processing uses a recent daily window of 7 days so old backfill data
 dailyfinance-process-sqlite \
   --database-url sqlite:///data/dailyfinance.db \
   --include-historical
+```
+
+Rebuild the processed-document search index from SQLite:
+
+```bash
+dailyfinance-rebuild-search-index \
+  --database-url sqlite:///data/dailyfinance.db
 ```
 
 ## Local API
@@ -230,11 +270,15 @@ GET /documents?source_name=marketwatch_top_stories
 GET /documents/sources
 GET /documents/{document_id}
 GET /processed-documents?limit=20
+GET /processed-documents?document_type=news&limit=20&offset=0
 GET /processed-documents?ticker=AAPL
 GET /processed-documents?document_type=news
 GET /processed-documents?recent_only=false
 GET /processed-documents?recent_days=30
 GET /processed-documents/{document_id}
+GET /search?q=nvidia
+GET /search?q=artificial%20intelligence&ticker=NVDA
+GET /search?q=rates&sort=published_at&limit=20&offset=0
 ```
 
 Interactive API docs are available when the server is running:
@@ -246,7 +290,7 @@ http://127.0.0.1:8000/docs
 ## Current Limitations
 
 - No LLM summarization yet.
-- No embeddings or vector search yet.
+- No embeddings, vector search, or semantic search yet.
 - No SEC EDGAR or FRED collector yet.
 - No scheduled ingestion jobs yet.
 - No authentication yet.

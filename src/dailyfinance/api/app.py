@@ -4,13 +4,13 @@ import os
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 
 from dailyfinance.config import get_default_recent_days, recent_cutoff
-from dailyfinance.models import RawDocument
+from dailyfinance.models import DocumentType, RawDocument
 from dailyfinance.storage import (
     DatabaseDocumentStore,
     DocumentStore,
@@ -93,28 +93,50 @@ def create_app(
     def list_processed_documents(
         source_name: str | None = None,
         ticker: str | None = None,
-        document_type: str | None = None,
+        document_type: DocumentType | None = None,
         published_from: datetime | None = None,
         published_to: datetime | None = None,
         recent_only: bool = True,
         recent_days: int | None = Query(default=None, ge=1),
-        limit: int = Query(default=20, ge=1),
-    ) -> list[dict[str, Any]]:
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        sort_by: Literal["processed_at", "published_at"] = "processed_at",
+        sort_order: Literal["asc", "desc"] = "desc",
+    ) -> dict[str, Any]:
         """Return processed documents from the SQLite store."""
         if not isinstance(store, DatabaseDocumentStore):
-            return []
+            return {"total": 0, "limit": limit, "offset": offset, "results": []}
+        cutoff = (
+            recent_cutoff(recent_days or get_default_recent_days())
+            if recent_only
+            else None
+        )
         documents = store.list_processed_documents(
             source_name=source_name,
             ticker=ticker,
-            document_type=document_type,
+            document_type=document_type.value if document_type else None,
             published_from=published_from,
             published_to=published_to,
-            recent_cutoff=recent_cutoff(recent_days or get_default_recent_days())
-            if recent_only
-            else None,
+            recent_cutoff=cutoff,
             limit=limit,
+            offset=offset,
+            sort_by=sort_by,
+            sort_order=sort_order,
         )
-        return [jsonable_encoder(document) for document in documents]
+        total = store.count_processed_documents(
+            source_name=source_name,
+            ticker=ticker,
+            document_type=document_type.value if document_type else None,
+            published_from=published_from,
+            published_to=published_to,
+            recent_cutoff=cutoff,
+        )
+        return {
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "results": [jsonable_encoder(document) for document in documents],
+        }
 
     @app.get("/processed-documents/{document_id}")
     def get_processed_document(document_id: str) -> dict[str, Any]:
@@ -125,6 +147,39 @@ def create_app(
         if document is None:
             raise HTTPException(status_code=404, detail="Processed document not found")
         return jsonable_encoder(document)
+
+    @app.get("/search")
+    def search_documents(
+        q: str = Query(min_length=1),
+        source_name: str | None = None,
+        ticker: str | None = None,
+        document_type: DocumentType | None = None,
+        published_from: datetime | None = None,
+        published_to: datetime | None = None,
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        sort: Literal["relevance", "published_at"] = "relevance",
+    ) -> dict[str, Any]:
+        """Search processed documents without returning raw payloads."""
+        if not isinstance(store, DatabaseDocumentStore):
+            return {"total": 0, "limit": limit, "offset": offset, "results": []}
+        total, results = store.search_processed_documents(
+            query=q,
+            source_name=source_name,
+            ticker=ticker,
+            document_type=document_type.value if document_type else None,
+            published_from=published_from,
+            published_to=published_to,
+            limit=limit,
+            offset=offset,
+            sort=sort,
+        )
+        return {
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "results": [jsonable_encoder(result) for result in results],
+        }
 
     return app
 
